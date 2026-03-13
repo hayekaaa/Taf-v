@@ -4,61 +4,78 @@ import pandas as pd
 import json
 import re
 
-# --- 1. الإعدادات ---
-API_KEY = st.secrets.get("GOOGLE_API_KEY", "")
-if not API_KEY:
-    st.error("يرجى إضافة مفتاح الـ API في Secrets")
+# إعدادات الصفحة
+st.set_page_config(page_title='TAF Evaluator', layout='wide')
+
+# الحصول على المفتاح من Secrets
+api_key = st.secrets.get('GOOGLE_API_KEY', '')
+
+if not api_key:
+    st.error('Missing API Key in Secrets')
 else:
-    genai.configure(api_key=API_KEY)
-model = genai.GenerativeModel('gemini-1.5-flash')
+    genai.configure(api_key=api_key)
+    model = genai.GenerativeModel('gemini-1.5-flash')
 
-# --- 2. الوظائف ---
-def extract_date_context(filename):
-    months = ["January", "February", "March", "April", "May", "June", 
-              "July", "August", "September", "October", "November", "December"]
-    found_month = next((m for m in months if m.lower() in filename.lower()), "الشهر الحالي")
-    year_match = re.search(r'20\d{2}', filename)
-    found_year = year_match.group(0) if year_match else "2026"
-    return f"{found_month} {found_year}"
+def get_date_from_name(filename):
+    return filename.split('.')[0]
 
-def process_txt_file(uploaded_file):
-    if uploaded_file is None: return None, None
+def clean_text(uploaded_file):
+    if uploaded_file is None:
+        return None
     try:
-        content = uploaded_file.getvalue().decode("utf-8")
-        clean_lines = []
-        for line in content.split('\n'):
-            # حذف أي نص بين أقواس مربعة [مثل هذا] بشكل آمن
-            line = re.sub(r"\[.*?\]", "", line).strip()
-            if line: clean_lines.append(line)
-        return "\n".join(clean_lines), extract_date_context(uploaded_file.name)
+        raw_content = uploaded_file.getvalue().decode('utf-8')
+        lines = raw_content.split('\n')
+        final_lines = []
+        for line in lines:
+            # حذف أي نص بين أقواس مربعة بطريقة بسيطة
+            cleaned = re.sub(r'\[.*?\]', '', line).strip()
+            if cleaned:
+                final_lines.append(cleaned)
+        return '\n'.join(final_lines)
     except:
-        return None, None
+        return None
 
-# --- 3. الواجهة ---
-st.set_page_config(page_title="TAF Quality", layout="wide")
-st.title("📊 نظام تقييم TAF")
+st.title('📊 نظام تقييم الـ TAF')
 
 c1, c2 = st.columns(2)
-with c1: metar_file = st.file_uploader("ملف METAR", type=['txt'])
-with c2: taf_file = st.file_uploader("ملف TAF", type=['txt'])
+with c1:
+    m_file = st.file_uploader('Upload METAR (.txt)', type=['txt'])
+with c2:
+    t_file = st.file_uploader('Upload TAF (.txt)', type=['txt'])
 
-if st.button("بدء التحليل"):
-    if metar_file and taf_file:
-        with st.spinner("جاري العمل..."):
-            m_text, m_date = process_txt_file(metar_file)
-            t_text, t_date = process_txt_file(taf_file)
+if st.button('Start Analysis'):
+    if m_file and t_file:
+        with st.spinner('Analyzing...'):
+            metar_text = clean_text(m_file)
+            taf_text = clean_text(t_file)
             
-            prompt = f"قارن TAF و METAR لشهري {m_date}. قيم أول 24 ساعة. دقة الرياح والرؤية والسحب. رد بـ JSON list فقط."
-            prompt += f"\n\nMETAR:\n{m_text[:7000]}\n\nTAF:\n{t_text[:7000]}"
+            # بناء البرومبت
+            p = 'Evaluate TAF vs METAR. Rules: 24h only, score Wind/Vis/Clouds/Phenom 0-100.'
+            p += ' Provide a JSON list: [{"taf_text": "...", "total_score": 85, "errors": "..."}]'
+            p += '\n\nMETAR:\n' + metar_text[:7000]
+            p += '\n\nTAF:\n' + taf_text[:7000]
             
             try:
-                res = model.generate_content(prompt).text
-                if "
-http://googleusercontent.com/immersive_entry_chip/0
-http://googleusercontent.com/immersive_entry_chip/1
-
-### لماذا هذا الإصدار سيعمل؟
-1. استخدمت `r"\[.*?\]"` بدلاً من الأنماط السابقة؛ هذا النمط يبحث عن أي شيء يبدأ بـ `[` وينتهي بـ `]` ويحذفه، وهو نمط بسيط جداً لا يحتوي على علامات المائلة المتكررة التي كانت تسبب لك الخطأ.
-2. الكود أصبح مختصراً وأقل عرضة لأخطاء "المسافات" (Indentation).
-
-**جرب الآن، وسيعمل البرنامج بإذن الله.**
+                res = model.generate_content(p).text
+                
+                # استخراج الـ JSON
+                if '```json' in res:
+                    res = res.split('```json')[1].split('```')[0]
+                elif '```' in res:
+                    res = res.split('```')[1].split('```')[0]
+                
+                data = json.loads(res.strip())
+                df = pd.DataFrame(data)
+                
+                st.subheader('Results')
+                st.dataframe(df, use_container_width=True)
+                
+                for item in data:
+                    score = item.get('total_score', 0)
+                    if score < 60:
+                        with st.expander('Errors for: ' + item.get('taf_text', '')[:50]):
+                            st.write(item.get('errors', 'No details'))
+            except Exception as e:
+                st.error('Error during analysis: ' + str(e))
+    else:
+        st.warning('Please upload both files')
