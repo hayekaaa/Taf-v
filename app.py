@@ -37,7 +37,6 @@ def process_txt_file(uploaded_file):
             
             # نمط البحث عن بشكل آمن
             source_pattern = r'\'
-            
             for line in lines:
                 # تنظيف علامات المصدر والمسافات الزائدة
                 line = re.sub(source_pattern, '', line)
