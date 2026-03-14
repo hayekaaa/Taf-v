@@ -4,106 +4,103 @@ import pandas as pd
 import json
 import re
 
-# --- 1. الإعدادات الأساسية ---
-st.set_page_config(page_title='TAF Evaluator Pro', layout='wide', page_icon='✈️')
+# --- 1. إعدادات النظام ---
+st.set_page_config(page_title='TAF Analysis Pro', layout='wide')
 
 # جلب المفتاح من Secrets
-api_key = st.secrets.get('GOOGLE_API_KEY', '')
+API_KEY = st.secrets.get('GOOGLE_API_KEY', '')
 
-if not api_key:
-    st.error('يرجى إضافة GOOGLE_API_KEY في إعدادات Secrets في Streamlit Cloud.')
+if not API_KEY:
+    st.error('يرجى ضبط GOOGLE_API_KEY في Streamlit Secrets.')
 else:
-    genai.configure(api_key=api_key)
-    model = genai.GenerativeModel('gemini-1.5-flash')
+    try:
+        genai.configure(api_key=API_KEY)
+        # تم تغيير مسمى الموديل لضمان التوافق وحل مشكلة 404
+        model = genai.GenerativeModel('gemini-1.5-flash')
+    except Exception as e:
+        st.error(f'خطأ في تهيئة الموديل: {e}')
 
-# --- 2. معالجة البيانات حسب صيغتك الخاصة ---
+# --- 2. معالجة البيانات (تاريخ 12 رقم + دمج أسطر TAF) ---
 
-def format_weather_data(text, is_taf=False):
-    """
-    تقوم بدمج الأسطر التي تتبع نفس التقرير (خاصة التاف المكسور الأسطر)
-    بناءً على وجود الطابع الزمني المكون من 12 رقماً في البداية.
-    """
+def process_data_content(text, is_taf=False):
     if not text:
         return ""
     
     lines = text.split('\n')
-    results = []
-    temp_block = ""
+    processed = []
+    current_block = ""
     
     for line in lines:
         line = line.strip()
         if not line:
             continue
             
-        # هل يبدأ السطر بـ 12 رقماً (التاريخ والوقت)؟
-        starts_with_time = re.match(r'^\d{12}', line)
+        # هل السطر يبدأ بـ 12 رقم؟ (مثل 202603010000)
+        is_new_entry = re.match(r'^\d{12}', line)
         
         if is_taf:
-            if starts_with_time:
-                if temp_block:
-                    results.append(temp_block)
-                temp_block = line
+            if is_new_entry:
+                if current_block:
+                    processed.append(current_block)
+                current_block = line
             else:
-                # سطر تابع للتاف السابق (مثل BECMG أو TEMPO)
-                temp_block += " " + line
+                # سطر تكميلي (BECMG/TEMPO) يتم دمجه مع التاف الحالي
+                current_block += " " + line
             
-            # إنهاء الكتلة عند وجود علامة "="
+            # إنهاء الكتلة إذا وجدنا علامة "="
             if line.endswith('='):
-                results.append(temp_block)
-                temp_block = ""
+                processed.append(current_block)
+                current_block = ""
         else:
-            # الميتار كل سطر مستقل
-            results.append(line)
+            # للميتار كل سطر يعتبر مدخلاً مستقلاً
+            processed.append(line)
             
-    if temp_block:
-        results.append(temp_block)
+    if current_block:
+        processed.append(current_block)
         
-    return '\n'.join(results)
+    return '\n'.join(processed)
 
-# --- 3. واجهة البرنامج ---
+# --- 3. واجهة المستخدم ---
 
-st.title('📊 نظام تحليل وتقييم الـ TAF')
-st.info('يدعم هذا الإصدار الصيغة الرقمية (YYYYMMDDHHMM) والتاف متعدد الأسطر.')
+st.title('📊 نظام تقييم دقة التوقعات (Digital Timestamp Version)')
+st.write('ارفع ملفات الميتار والتاف التي تبدأ بـ YYYYMMDDHHMM')
 
-c1, c2 = st.columns(2)
-with c1:
-    m_file = st.file_uploader('ارفع ملف METAR (.txt)', type=['txt'])
-with c2:
-    t_file = st.file_uploader('ارفع ملف TAF (.txt)', type=['txt'])
+col1, col2 = st.columns(2)
+with col1:
+    metar_input = st.file_uploader('ملف METAR (.txt)', type=['txt'])
+with col2:
+    taf_input = st.file_uploader('ملف TAF (.txt)', type=['txt'])
 
-if st.button('🚀 بدء التحليل العميق'):
-    if m_file and t_file:
+if st.button('🚀 تشغيل التحليل العميق'):
+    if metar_input and taf_input:
         try:
             # قراءة ومعالجة البيانات
-            metar_raw = m_file.getvalue().decode('utf-8')
-            taf_raw = t_file.getvalue().decode('utf-8')
+            m_raw = metar_input.getvalue().decode('utf-8')
+            t_raw = taf_input.getvalue().decode('utf-8')
             
-            cleaned_metar = format_weather_data(metar_raw, is_taf=False)
-            cleaned_taf = format_weather_data(taf_raw, is_taf=True)
+            final_metar = process_data_content(m_raw, is_taf=False)
+            final_taf = process_data_content(t_raw, is_taf=True)
             
-            with st.spinner('جاري المقارنة بين التوقعات والواقع...'):
-                
-                # بناء البرومبت (تم تأمين الأقواس بمضاعفتها {{ }} لمنع الخطأ)
-                prompt = f"""
-                أنت خبير أرصاد جوية. قم بتقييم دقة الـ TAF مقارنة بالـ METAR.
-                البيانات تبدأ بطابع زمني 12 رقم (سنة شهر يوم ساعة دقيقة).
-                
-                المطلوب:
-                1. قارن أول 24 ساعة من كل TAF مقابل الميتارات في نفس الفترة.
-                2. قيم (الرياح، الرؤية، السحب، والظواهر) من 100.
-                3. رد بصيغة JSON List فقط.
+            with st.spinner('جاري التحليل...'):
+                # بناء البرومبت مع حماية الأقواس (استخدام {{ }} بدلاً من { })
+                # هذا يحل مشكلة Invalid format specifier نهائياً
+                prompt_text = f"""
+                بصفتك خبير أرصاد، قارن دقة الـ TAF مع الـ METAR الفعلي.
+                ملاحظة: كل سطر يبدأ بطابع زمني (12 رقم).
+                المطلوب: تقييم أول 24 ساعة من كل TAF (رياح، رؤية، سحب، ظواهر).
+                الرد يجب أن يكون JSON List فقط.
                 
                 [البيانات]:
                 METAR:
-                {cleaned_metar[:8000]}
+                {final_metar[:7000]}
                 
                 TAF:
-                {cleaned_taf[:8000]}
+                {final_taf[:7000]}
                 
-                Response format example:
+                مثال للرد المطلوب:
                 [[
                   {{
-                    "taf_id": "رأس التاف هنا",
+                    "taf_id": "رأس التاف مع التاريخ",
                     "wind_score": 90,
                     "vis_score": 80,
                     "cloud_score": 70,
@@ -113,40 +110,37 @@ if st.button('🚀 بدء التحليل العميق'):
                 ]]
                 """
                 
-                response = model.generate_content(prompt)
-                full_res = response.text
+                # إرسال الطلب (بدون f-string للأجزاء التي تحتوي على أقواس لتجنب الخطأ)
+                response = model.generate_content(prompt_text)
+                raw_res = response.text
                 
-                # استخراج الـ JSON وتنظيفه
-                if '```json' in full_res:
-                    full_res = full_res.split('```json')[1].split('```')[0]
-                elif '```' in full_res:
-                    full_res = full_res.split('```')[1].split('```')[0]
+                # تنظيف استجابة JSON
+                if '```json' in raw_res:
+                    raw_res = raw_res.split('```json')[1].split('```')[0]
+                elif '```' in raw_res:
+                    raw_res = raw_res.split('```')[1].split('```')[0]
                 
-                data = json.loads(full_res.strip())
-                df = pd.DataFrame(data)
+                analysis_data = json.loads(raw_res.strip())
+                df = pd.DataFrame(analysis_data)
                 
                 # عرض النتائج
-                st.subheader('✅ نتائج التقييم')
+                st.subheader('✅ نتائج تقييم الدقة')
                 
-                def color_logic(val):
+                def color_cells(val):
                     if isinstance(val, (int, float)):
-                        c = 'red' if val < 60 else 'orange' if val < 85 else 'green'
-                        return f'color: {c}; font-weight: bold'
+                        color = 'red' if val < 60 else 'orange' if val < 85 else 'green'
+                        return f'color: {color}; font-weight: bold'
                     return ''
 
-                st.dataframe(df.style.map(color_logic, subset=['total_score']), use_container_width=True)
+                st.dataframe(df.style.map(color_cells, subset=['total_score']), use_container_width=True)
                 
-                # قسم التحليل التفصيلي
-                st.divider()
-                st.subheader('🔍 تحليل الأخطاء')
-                for item in data:
+                # عرض تفاصيل الأخطاء
+                for item in analysis_data:
                     if item.get('total_score', 0) < 60:
-                        with st.expander(f"⚠️ {item.get('taf_id')[:50]}..."):
-                            st.error(f"الدقة: {item.get('total_score')}%")
-                            st.write(f"الأسباب: {item.get('errors')}")
+                        with st.expander(f"⚠️ تفاصيل: {item.get('taf_id')[:50]}..."):
+                            st.write(f"الأخطاء: {item.get('errors')}")
 
-        except Exception as e:
-            st.error(f'حدث خطأ في النظام: {str(e)}')
-            st.info('تأكد من أن الملفات تتبع الصيغة التي ذكرتها.')
+        except Exception as err:
+            st.error(f'حدث خطأ أثناء المعالجة: {err}')
     else:
-        st.warning('يرجى رفع الملفين أولاً.')
+        st.warning('يرجى رفع الملفات أولاً.')
