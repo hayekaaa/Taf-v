@@ -4,30 +4,30 @@ import pandas as pd
 import json
 import re
 
-# --- 1. Configuration & Security ---
-st.set_page_config(page_title='TAF Quality Evaluator', layout='wide', page_icon='✈️')
+# --- 1. إعدادات الصفحة والأمان ---
+st.set_page_config(page_title='نظام تقييم TAF المطور', layout='wide', page_icon='✈️')
 
-# Get API Key from Secrets
+# جلب مفتاح الـ API من Secrets
 api_key = st.secrets.get('GOOGLE_API_KEY', '')
 
 if not api_key:
-    st.error('Missing GOOGLE_API_KEY in Streamlit Secrets!')
+    st.error('خطأ: لم يتم العثور على مفتاح GOOGLE_API_KEY في إعدادات Secrets.')
 else:
     genai.configure(api_key=api_key)
-    # Using gemini-1.5-flash for faster analysis
     model = genai.GenerativeModel('gemini-1.5-flash')
 
-# --- 2. Data Processing Functions ---
+# --- 2. دوال معالجة البيانات (المحرك الرئيسي) ---
 
-def clean_and_format_data(raw_text, is_taf=False):
+def process_meteorological_data(raw_text, is_taf=False):
     """
-    Cleans the raw text and handles the multi-line TAF format ending with '='.
+    تقوم هذه الدالة بتنظيف النص ودمج أسطر الـ TAF المكسورة 
+    بناءً على وجود الطابع الزمني (12 رقم) في بداية السطر.
     """
     if not raw_text:
         return ""
     
     lines = raw_text.split('\n')
-    processed_lines = []
+    processed_blocks = []
     current_block = ""
     
     for line in lines:
@@ -35,120 +35,134 @@ def clean_and_format_data(raw_text, is_taf=False):
         if not line:
             continue
             
+        # التحقق إذا كان السطر يبدأ بطابع زمني (YYYYMMDDHHMM)
+        has_timestamp = re.match(r'^\d{12}', line)
+        
         if is_taf:
-            # Check if line starts with a timestamp (12 digits)
-            if re.match(r'^\d{12}', line):
+            if has_timestamp:
+                # إذا وجدنا طابع زمني جديد، نحفظ الكتلة السابقة ونبدأ واحدة جديدة
                 if current_block:
-                    processed_lines.append(current_block)
+                    processed_blocks.append(current_block)
                 current_block = line
             else:
-                # Append subsequent lines of the same TAF
+                # إذا لم يبدأ السطر برقم، فهو تابع للـ TAF السابق (مثل BECMG أو TEMPO)
                 current_block += " " + line
             
-            # If line ends with '=', finish the block
+            # إذا انتهى السطر بعلامة "=" يتم إغلاق الكتلة فوراً
             if line.endswith('='):
-                processed_lines.append(current_block)
+                processed_blocks.append(current_block)
                 current_block = ""
         else:
-            # For METAR, just take the line as is
-            processed_lines.append(line)
+            # بالنسبة للميتار، كل سطر هو وحدة مستقلة
+            processed_blocks.append(line)
             
+    # إضافة آخر كتلة إذا لم تكن فارغة
     if current_block:
-        processed_lines.append(current_block)
+        processed_blocks.append(current_block)
         
-    return '\n'.join(processed_lines)
+    return '\n'.join(processed_blocks)
 
-# --- 3. User Interface ---
+# --- 3. تصميم واجهة المستخدم ---
 
-st.title('📊 نظام تقييم جودة الـ TAF')
-st.markdown("""
-هذا النظام مصمم لتحليل بيانات **METAR** و **TAF** بالصيغة الزمنية الرقمية. 
-سيتم تحليل أول 24 ساعة من كل TAF ومقارنتها بالواقع المرصود.
-""")
+st.title('📊 نظام تقييم دقة التوقعات الجوية (TAF)')
+st.write('قم برفع ملفات الميتار والتاف التي تحتوي على الطابع الزمني (YYYYMMDDHHMM).')
 
 col1, col2 = st.columns(2)
 
 with col1:
-    metar_file = st.file_uploader('Upload METAR File (.txt)', type=['txt'], key='metar')
+    metar_file = st.file_uploader('ملف الميتار (METAR.txt)', type=['txt'])
 with col2:
-    taf_file = st.file_uploader('Upload TAF File (.txt)', type=['txt'], key='taf')
+    taf_file = st.file_uploader('ملف التوقعات (TAF.txt)', type=['txt'])
 
-if st.button('🚀 بدء عملية التقييم الذكي'):
+# --- 4. منطق التقييم والتحليل ---
+
+if st.button('🚀 بدء التحليل الذكي والمقارنة'):
     if metar_file and taf_file:
         try:
-            # Read and decode files
+            # قراءة النصوص من الملفات المرفوعة
             metar_raw = metar_file.getvalue().decode('utf-8')
             taf_raw = taf_file.getvalue().decode('utf-8')
             
-            # Process and Clean
-            metar_clean = clean_and_format_data(metar_raw, is_taf=False)
-            taf_clean = clean_and_format_data(taf_raw, is_taf=True)
+            # معالجة ودمج الأسطر بناءً على الصيغة المطلوبة
+            metar_final = process_meteorological_data(metar_raw, is_taf=False)
+            taf_final = process_meteorological_data(taf_raw, is_taf=True)
             
-            with st.spinner('جاري تحليل البيانات ومقارنة الجداول الزمنية...'):
-                # Prepare AI Prompt
+            with st.spinner('جاري مقارنة البيانات وتحليل الدقة...'):
+                
+                # بناء البرومبت مع حماية الأقواس المتعرجة بمضاعفتها {{ }}
                 prompt = f"""
-                As a meteorological expert, evaluate the TAF accuracy against METAR observations.
+                بصفتك خبير أرصاد جوية، قم بتقييم دقة الـ TAF مقابل الـ METAR.
                 
-                Data Format Note: Each line starts with a YYYYMMDDHHMM timestamp.
-                Rules:
-                1. Evaluate only the first 24 hours of each TAF validity period.
-                2. Compare: Wind speed/direction, Visibility, Cloud cover/height, and Weather phenomena.
-                3. Calculate accuracy (0-100%) for each category.
-                4. Provide a total score average.
+                ملاحظة التنسيق: كل سطر يبدأ بطابع زمني رقمي YYYYMMDDHHMM.
+                قواعد التحليل:
+                1. حلل أول 24 ساعة فقط من فترة صلاحية كل TAF.
+                2. قارن العناصر: (سرعة/اتجاة الرياح، الرؤية، السحب، والظواهر الجوية).
+                3. احسب نسبة الدقة (0-100) لكل عنصر.
+                4. قدم النتيجة النهائية كقائمة JSON حصراً.
                 
-                Input Data:
-                [METAR DATA]:
-                {metar_clean[:10000]}
+                [البيانات المستلمة - METAR]:
+                {metar_final[:8000]}
                 
-                [TAF DATA]:
-                {taf_clean[:10000]}
+                [البيانات المستلمة - TAF]:
+                {taf_final[:8000]}
                 
                 Response Format: STRICT JSON LIST ONLY.
-                Example: [{"taf_header": "202603010440 TAF...", "wind_score": 90, "vis_score": 80, "cloud_score": 70, "total_score": 80, "errors": "Reasoning here"}]
+                Example Structure:
+                [[
+                  {{
+                    "taf_header": "202603010440 TAF...",
+                    "wind_score": 90,
+                    "vis_score": 85,
+                    "cloud_score": 70,
+                    "total_score": 82,
+                    "errors": "اكتب هنا الأسباب التقنية باللغة العربية"
+                  }}
+                ]]
                 """
                 
+                # استدعاء نموذج Gemini
                 response = model.generate_content(prompt)
                 res_text = response.text
                 
-                # Extract JSON from potential markdown code blocks
+                # تنظيف النص المستخرج من علامات التنسيق الخاصة بـ JSON
                 if '```json' in res_text:
                     res_text = res_text.split('```json')[1].split('```')[0]
                 elif '```' in res_text:
                     res_text = res_text.split('```')[1].split('```')[0]
                 
-                results_json = json.loads(res_text.strip())
-                df = pd.DataFrame(results_json)
+                # تحويل النص إلى كائن JSON ثم إلى DataFrame
+                results = json.loads(res_text.strip())
+                df = pd.DataFrame(results)
                 
-                # Show Table
-                st.subheader('📈 جدول دقة التوقعات')
+                # عرض النتائج في جدول
+                st.subheader('📈 تقرير الدقة التفصيلي')
                 
-                # Styling the dataframe
-                def color_scores(val):
+                def apply_color(val):
                     if isinstance(val, (int, float)):
                         color = 'red' if val < 60 else 'orange' if val < 85 else 'green'
                         return f'color: {color}; font-weight: bold'
                     return ''
 
-                st.dataframe(df.style.applymap(color_scores, subset=['total_score']), use_container_width=True)
+                st.dataframe(df.style.map(apply_color, subset=['total_score']), use_container_width=True)
                 
-                # Error Analysis Section
+                # تحليل الأخطاء للتقييمات الضعيفة
                 st.divider()
-                st.subheader('🔍 تحليل الإخفاقات (التقييم أقل من 60%)')
+                st.subheader('🔍 تحليل الإخفاقات (أقل من 60%)')
                 
-                low_perf = [r for r in results_json if r.get('total_score', 0) < 60]
-                if low_perf:
-                    for item in low_perf:
-                        with st.expander(f"⚠️ {item.get('taf_header', 'TAF')[:60]}..."):
-                            st.error(f"**الدرجة الكلية:** {item.get('total_score')}%")
-                            st.write(f"**الأخطاء المرصودة:** {item.get('errors')}")
+                low_performance = [item for item in results if item.get('total_score', 0) < 60]
+                if low_performance:
+                    for item in low_performance:
+                        with st.expander(f"⚠️ {item.get('taf_header', 'TAF')[:50]}..."):
+                            st.error(f"الدقة الكلية: {item.get('total_score')}%")
+                            st.info(f"التحليل التقني: {item.get('errors')}")
                 else:
-                    st.success('ممتاز! جميع التوقعات في هذا الملف تجاوزت نسبة دقة 60%.')
+                    st.success('جميع التوقعات في هذا الملف ذات دقة جيدة جداً!')
                     
         except Exception as e:
-            st.error(f'حدث خطأ أثناء المعالجة: {str(e)}')
-            st.info('تأكد من أن ملفات النص تحتوي على الصيغة المطلوبة.')
+            st.error(f'حدث خطأ غير متوقع: {str(e)}')
+            st.info('تأكد من أن الملفات المرفوعة تتبع الصيغة الرقمية المطلوبة.')
     else:
-        st.warning('يرجى رفع ملفات METAR و TAF أولاً.')
+        st.warning('يرجى رفع ملف الميتار وملف التاف أولاً.')
 
 st.sidebar.markdown('---')
-st.sidebar.info('ملاحظة: تأكد من أن أسماء الملفات لا تحتوي على مسافات أو رموز خاصة.')
+st.sidebar.caption('إصدار v2.0 - معالج البيانات الرقمية')
